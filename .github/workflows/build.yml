@@ -292,40 +292,92 @@ jobs:
 
           fi
 
+      - name: Restore cached AOSP Clang archive
+        uses: actions/cache@v4
+        with:
+          path: ${{ inputs.clang_version }}.tar.gz
+          key: aosp-clang-${{ inputs.clang_version }}-v1
+
       - name: Download AOSP Clang
         run: |
           case "${{ inputs.clang_version }}" in
 
             "clang-r416183b1")
-            curl -LO https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12-qpr3-release/clang-r416183b1.tar.gz || exit 1
+            BRANCH=android12-qpr3-release
             ;;
 
             "clang-r450784d")
-            curl -LO https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android13-qpr3-release/clang-r450784d.tar.gz || exit 1
+            BRANCH=android13-qpr3-release
             ;;
 
             "clang-r487747c")
-            curl -LO https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android14-qpr3-release/clang-r487747c.tar.gz || exit 1
+            BRANCH=android14-qpr3-release
             ;;
 
             "clang-r536225")
-            curl -LO https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android15-qpr2-release/clang-r536225.tar.gz || exit 1
+            BRANCH=android15-qpr2-release
             ;;
 
             "clang-r547379")
-            curl -LO https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android16-qpr2-release/clang-r547379.tar.gz || exit 1
+            BRANCH=android16-qpr2-release
             ;;
 
             "clang-r563880c")
-            curl -LO https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android16-qpr2-release/clang-r563880c.tar.gz || exit 1
+            BRANCH=android16-qpr2-release
+            ;;
+
+            *)
+            echo "Unknown clang version: ${{ inputs.clang_version }}"
+            exit 1
             ;;
 
           esac
 
-          mkdir -p toolchains/${{ inputs.clang_version }}
-          tar -xf "${{ inputs.clang_version }}.tar.gz" -C "toolchains/${{ inputs.clang_version }}" || exit 1
+          CT="${{ inputs.clang_version }}"
+          TARBALL="${CT}.tar.gz"
+          URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/${BRANCH}/${CT}.tar.gz"
+
+          # a real gzip stream starts with 1f 8b; an HTML error page does not
+          is_gzip() {
+            [ -s "$1" ] && [ "$(head -c 2 "$1" | od -An -tx1 | tr -d ' \n')" = "1f8b" ]
+          }
+
+          fetch_archive() {
+            local url="$1" out="$2" label="$3"
+            for attempt in $(seq 1 10); do
+              echo "::group::${label}: attempt ${attempt}"
+              rm -f "${out}.part"
+              if curl -fL --retry 3 --retry-delay 5 --retry-all-errors \
+                      --connect-timeout 30 --speed-limit 1024 --speed-time 60 \
+                      -o "${out}.part" "$url" && is_gzip "${out}.part"; then
+                mv "${out}.part" "$out"
+                echo "::endgroup::"
+                echo "${label}: ok ($(du -h "$out" | cut -f1))"
+                return 0
+              fi
+              echo "::warning::${label}: attempt ${attempt} failed (bad response or interrupted transfer)"
+              echo "::endgroup::"
+              rm -f "${out}.part"
+              sleep $(( attempt * 10 ))
+            done
+            echo "::error::${label}: giving up after 10 attempts"
+            return 1
+          }
+
+          if is_gzip "$TARBALL"; then
+            echo "Using cached ${TARBALL} ($(du -h "$TARBALL" | cut -f1))"
+          else
+            rm -f "$TARBALL"
+            fetch_archive "$URL" "$TARBALL" "clang ${CT}" || exit 1
+          fi
+
+          mkdir -p "toolchains/${CT}"
+          tar -xf "$TARBALL" -C "toolchains/${CT}"
+          test -x "toolchains/${CT}/bin/clang" || { echo "::error::toolchain extracted but bin/clang is missing"; exit 1; }
+
           if [[ "${{ inputs.enable_gcc_32bits }}" == "true" ]]; then
-            curl -LO https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/heads/android12L-release.tar.gz
+            GCC_URL="https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/heads/android12L-release.tar.gz"
+            is_gzip android12L-release.tar.gz || { rm -f android12L-release.tar.gz; fetch_archive "$GCC_URL" android12L-release.tar.gz "gcc-arm-4.9" || exit 1; }
             mkdir -p toolchains/arm-linux-androideabi
             tar -xf android12L-release.tar.gz -C toolchains/arm-linux-androideabi
           fi
